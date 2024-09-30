@@ -1,0 +1,16 @@
+# Corner: lower-left
+#
+grid 20 20
+left-boundary open 1.0
+right-boundary image 2
+top-boundary closed
+bottom-boundary closed
+initial 1.0
+
+# TODO
+timespan 1000
+diff-factor 0.1
+
+# Use co_broadcast to propagate the values to the other images
+
+# Use teams to make sure that the superfluous images are not interfering

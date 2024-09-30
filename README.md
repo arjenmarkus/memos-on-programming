@@ -1,7 +1,6 @@
 # Memos on programming
 
 
-## On the name "wisconst"
 Sometimes you come across a seemlingly simple programming problem and think
 it might be fun to analyse it: consider the costs in terms of memory use or
 amount of code involved, compare different algorithms or implementations.

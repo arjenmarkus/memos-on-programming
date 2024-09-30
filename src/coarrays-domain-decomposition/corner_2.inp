@@ -1,0 +1,8 @@
+# Corner: lower-right
+#
+grid 40 20
+left-boundary image 1
+right-boundary closed
+top-boundary image 3
+bottom-boundary open 0.0
+initial 0.0
