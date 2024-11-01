@@ -276,9 +276,17 @@ to finish.
 The first team, however, does the integration over time and exchanges the boundary data at each time step. For this synchronisation is
 required, otherwise we cannot be sure that the data that are copied from one domain to the other are consistent.
 \item
-When the calculation has finished, the resulting concentrations are written to separate files, so that they can be visualised. This is
+When the calculation has finished, the resulting concentrations are written to separate files, so that they can be visualised (see Figure \ref{domains}). This is
 simply an easy solution, probably not the best possible.
 \end{itemize}
+
+\begin{figure}[H]
+\caption{Solution of the diffusion problem on three domains in an L-shape. (Courtesy Ivan Pribec.)}
+\label{domains}
+\begin{center}
+\includegraphics[width=0.9\textwidth]{report_corner.png}
+\end{center}
+\end{figure}
 
 
 \section{Caveats}
@@ -311,8 +319,87 @@ compile time. As this is a somewhat unfriendly method, the final version uses te
 to accomplish in this case.
 
 
+\section{An MPI-based equivalent}
+With this coarrays-based version completed, it became obvious that an MPI-based version should follow. The demonstration program
+does not require much complicated interaction, so it should be easy to transform it to use MPI instead. Just as with the
+coarrays, each process, the MPI equivalent of "image", takes care of one subgrid. But there were some tricky parts:
+
+\begin{itemize}
+\item
+While in the coarrays version an image addresses the arrays on the neighbouring images directly, this is not possible with MPI: there you
+send a message to the receiving process which is the neighbour in the multidomain set-up,
+and this should actively pick it up. So there is more explicit cooperation required.
+\item
+Each process needs to know which subgrids are adjacent. One solution would be for each process to send messages to each
+other process to relay this information, but with $N$ subgrids, this would mean $4(N-1)$ messages per subgrid, or roughly $4N^2$ in total.
+If $N$ is small, this is not a real problem, but suppose you have 100 or 1000 subgrids, then this might become a serious matter.
+In a two-dimensional geometry, you would expect only in the order of $4N$ interfaces.
+\item
+You need to make sure that the processes have received the messages and have processed the information. There is probably
+a clear construction to achieve this, but it seemed cumbersome. Instead, the solution chosen here was to have the main process
+gather the information from each subgrid on its neighbours and then send that
+entire piece of information to each process, so that it could determine what subgrids are adjacent.
+\end{itemize}
+
+All in all, the following fragment implements this information exchange:
+
+\begin{lstlisting}
+    call MPI_GATHER( domain%connecting_domain, size(domain%connecting_domain), &
+                     MPI_INTEGER, connection, size(connection,1), &
+                     MPI_INTEGER, root, MPI_COMM_WORLD, ierror )
+
+    call MPI_Barrier( MPI_COMM_WORLD, ierror )
+
+    call MPI_BCAST( connection, size(connection), MPI_INTEGER, root, &
+                    MPI_COMM_WORLD, ierror )
+
+    call MPI_Barrier( MPI_COMM_WORLD, ierror )
+
+    do j = 1,size(connection,2)
+        do i = 1,size(connection,1)
+            if ( connection(i,j) == process_Rank+1 ) then
+                domain%destination(side(i)) = j - 1      ! Shift by 1 required
+            endif
+        enddo
+    enddo
+\end{lstlisting}
+
+Now each process has all the information necessary: it knows which of its sides are adjacent to which
+subgrid (or whether it is simply an external boundary).
+
+Sending the results of time $T$ to the correct neighbour requires a message for this neighbour:
+
+\begin{lstlisting}
+    if ( domain%destination(1) /= -1 ) then
+        call MPI_SEND( left_concentration,   width+2,  MPI_REAL, &
+                       domain%destination(1), 2, MPI_COMM_WORLD, ierror )
+    endif
+\end{lstlisting}
+
+(Note: the literal \verb+2+ is the encoding of the right-hand side of the neighbour. A symbolic name -- parameter -- would have been better.)
+
+The neighbour should in turn pick up the message:
+
+\begin{lstlisting}
+    if ( domain%boundary_type(2) == 2 ) then
+        call MPI_RECV( left_concentration, width+2, MPI_REAL, &
+                       domain%connecting_domain(2)-1, 2, &
+                       MPI_COMM_WORLD, status, ierror )
+        conc(length+2,:) = left_concentration(1:width+2)
+    elseif ( domain%boundary_type(2) == 0 ) then
+        conc(length+2,:) = conc(length+1,:)
+    endif
+\end{lstlisting}
+
+The program that resulted probably contains too much "juggling" of the IDs of the various subgrids. This is partly due to the fact that with MPI
+the process IDs start with zero instead of one, as with coarrays, and I wanted the code to stay as close to the coarrays version as
+possible. Another reason is that the left-hand side in one subgrid is the right-hand side in the adjacent subgrid. This may have confused
+the coding more than necessary. But whatever the merits and shortcomings of this second demo program, it does work and gives exactly
+the same results as the coarrays version.
+
+
 \appendix
-\section{Source code}
+\section{Source code of the coarrays version}
 The source of the demonstration program is shown here in full. It contains traces of its development, such as extra output to see what is happening.
 It could also be useful to characterise the sides by integer parameters instead of the literal numbers 1, 2, 3 and 4.
 
@@ -605,6 +692,125 @@ subroutine read_input( domain )
      enddo
 end subroutine read_input
 end program corner
+\end{verbatim}
+\end{small}
+
+\section{Source code of the MPI-based version}
+Below is an excerpt of the MPI-based demo program. The parts that are almost the same as in the coarrays version have been left out.
+The program may be simplified further, but that is a possible next step.
+
+The \verb+domain_type+ derived type has an extra component: \verb+destination+ to keep track of both sides.
+
+\begin{small}
+\begin{verbatim}
+    ...
+    !
+    ! Initialise the MPI environment
+    !
+    call MPI_INIT(ierror)
+    call MPI_COMM_SIZE(MPI_COMM_WORLD, size_Of_Cluster, ierror)
+    call MPI_COMM_RANK(MPI_COMM_WORLD, process_Rank, ierror)
+
+    root = 0
+
+    ...
+
+    !
+    ! Read the input and check the number of processes
+    !
+    write( filename, '(a,i0,a)' ) 'corner_', process_Rank+1, '.inp'
+
+    ...
+
+    !
+    ! Prepare the calculation
+    !
+    call MPI_ALLREDUCE( domain%nx, xmax, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierror )
+    call MPI_ALLREDUCE( domain%ny, ymax, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierror )
+
+    call MPI_BCAST( timespan,    1, MPI_INTEGER, root, MPI_COMM_WORLD, ierror )
+    call MPI_BCAST( diff_factor, 1, MPI_REAL,    root, MPI_COMM_WORLD, ierror )
+
+    ...
+
+    !
+    ! Exchange the connectivity information:
+    ! Gather the information on the root process and then send it off to each
+    ! process. In turn, each process examines the array connection to fill
+    ! the destination field.
+    !
+    allocate( connection(4,size_Of_Cluster) )
+
+    call MPI_GATHER( domain%connecting_domain, size(domain%connecting_domain), MPI_INTEGER, &
+                     connection, size(connection,1), MPI_INTEGER, root, MPI_COMM_WORLD, ierror )
+
+    call MPI_Barrier( MPI_COMM_WORLD, ierror )
+
+    call MPI_BCAST( connection, size(connection), MPI_INTEGER, root, MPI_COMM_WORLD, ierror )
+
+    call MPI_Barrier( MPI_COMM_WORLD, ierror )
+
+    do j = 1,size(connection,2)
+        do i = 1,size(connection,1)
+            if ( connection(i,j) == process_Rank+1 ) then
+                domain%destination(side(i)) = j - 1      ! Shift by 1 required
+            endif
+        enddo
+    enddo
+
+    ...
+
+    !
+    ! Do the calculation
+    !
+    do i = 1,timespan
+
+        ...
+
+        !
+        ! We can send these arrays without having to wait. Use the tag to identify
+        ! the boundary.
+        ! For now: use blocking send and receive
+        !
+        if ( domain%destination(1) /= -1 ) then
+            call MPI_SEND( left_concentration,   width+2,  MPI_REAL, domain%destination(1), 2, &
+                           MPI_COMM_WORLD, ierror )
+        endif
+
+        ... similarly the other three sides
+
+        !
+        ! Wait for all the processes before copying the boundaries
+        ! We need to know which domains want our information!
+        !
+        call MPI_Barrier( MPI_COMM_WORLD, ierror )
+
+        ! Left
+        if ( domain%boundary_type(1) == 2 ) then
+            call MPI_RECV( right_concentration, width+2, MPI_REAL, domain%connecting_domain(1)-1, 1, &
+                           MPI_COMM_WORLD, status, ierror )
+            conc(1,:) = right_concentration(1:width+2)
+        elseif ( domain%boundary_type(1) == 0 ) then
+            conc(1,:) = conc(2,:)
+        endif
+
+        ... similarly the other three sides
+
+        !
+        ! And when everything has been copied, continue
+        !
+        call MPI_Barrier( MPI_COMM_WORLD, ierror )
+    enddo
+
+    write(*,*) 'Process ', process_Rank, ' has reached the end'
+
+    ... write out the result per subgrid
+
+    !
+    ! Wait for all images
+    !
+    call MPI_Barrier( MPI_COMM_WORLD, ierror )
+    call MPI_FINALIZE(ierror)
 \end{verbatim}
 \end{small}
 
